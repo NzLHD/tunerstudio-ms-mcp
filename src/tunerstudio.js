@@ -371,16 +371,20 @@ function summarizeAppliedChange(element, before, after) {
   return { kind: element.kind, name: element.name, occurrence: element.occurrence, rows: element.rows, columns: element.cols, changedCellCount: changedCells.length, changedCells: changedCells.slice(0, 200) };
 }
 
-export async function stageTuneChanges(projectId, sourceRelativePath, outputFileName, changes, expectedSourceSha256, env = process.env) {
-  const document = await readTuneDocument(projectId, sourceRelativePath, env);
-  const sourceHash = sha256(document.buffer);
-  if (!expectedSourceSha256) throw new Error("expectedSourceSha256 is required; read the tune again before editing");
-  if (expectedSourceSha256.toLowerCase() !== sourceHash) throw new Error("Source tune hash does not match expectedSourceSha256; read the tune again before editing");
-  assertSimpleName(outputFileName, "outputFileName");
-  if (!/\.msq$/i.test(outputFileName)) throw new Error("outputFileName must end in .msq");
-  if (outputFileName.toLowerCase() === "currenttune.msq") throw new Error("CurrentTune.msq is reserved and cannot be created by the MCP server");
-  if (!Array.isArray(changes) || changes.length < 1) throw new Error("At least one tune change is required");
+async function findRunningTunerStudioProcesses() {
+  if (process.platform !== "linux") return [];
+  const entries = await fs.readdir("/proc", { withFileTypes: true }).catch(() => []);
+  const matches = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
+    const commandLine = await fs.readFile(path.join("/proc", entry.name, "cmdline"), "utf8").catch(() => "");
+    if (commandLine.includes("TunerStudioMS.jar")) matches.push(Number(entry.name));
+  }
+  return matches;
+}
 
+function renderTuneChanges(document, changes) {
+  if (!Array.isArray(changes) || changes.length < 1) throw new Error("At least one tune change is required");
   const elements = parseTuneElements(document.text);
   const replacements = [];
   const appliedChanges = [];
@@ -423,25 +427,69 @@ export async function stageTuneChanges(projectId, sourceRelativePath, outputFile
 
   let outputText = document.text;
   for (const replacement of replacements.sort((a, b) => b.start - a.start)) outputText = `${outputText.slice(0, replacement.start)}${replacement.content}${outputText.slice(replacement.end)}`;
-  const outputBuffer = Buffer.from(outputText, "latin1");
-  const reviewDir = path.join(document.projectDir, "McpReview");
-  await fs.mkdir(reviewDir, { recursive: true });
-  const realReviewDir = await resolveExistingRealPathInside(document.projectDir, reviewDir);
-  const outputPath = resolveInside(realReviewDir, outputFileName);
-  if (await exists(outputPath) || await exists(`${outputPath}.mcp-review.json`)) throw new Error("Review output or manifest already exists; choose a new outputFileName");
-  await fs.writeFile(outputPath, outputBuffer, { flag: "wx" });
-  const outputRelativePath = path.relative(document.projectDir, outputPath);
+  return { outputBuffer: Buffer.from(outputText, "latin1"), appliedChanges };
+}
+
+function backupTimestamp() {
+  return new Date().toISOString().replace(/[-:]/g, "").replace("T", "-");
+}
+
+export async function applyCurrentTuneChanges(projectId, changes, expectedSourceSha256, env = process.env) {
+  const runningProcesses = await findRunningTunerStudioProcesses();
+  if (runningProcesses.length > 0) throw new Error(`Close TunerStudio before editing CurrentTune.msq (running PID${runningProcesses.length === 1 ? "" : "s"}: ${runningProcesses.join(", ")})`);
+  const document = await readTuneDocument(projectId, "CurrentTune.msq", env);
+  const sourceHash = sha256(document.buffer);
+  if (!expectedSourceSha256) throw new Error("expectedSourceSha256 is required; read CurrentTune.msq again before editing");
+  if (expectedSourceSha256.toLowerCase() !== sourceHash) throw new Error("CurrentTune.msq hash does not match expectedSourceSha256; read the tune again before editing");
+  const { outputBuffer, appliedChanges } = renderTuneChanges(document, changes);
+
+  const backupDir = path.join(document.projectDir, "McpBackups");
+  await fs.mkdir(backupDir, { recursive: true });
+  const realBackupDir = await resolveExistingRealPathInside(document.projectDir, backupDir);
+  const backupFileName = `CurrentTune-before-${backupTimestamp()}-${sourceHash.slice(0, 12)}.msq`;
+  const backupPath = resolveInside(realBackupDir, backupFileName);
+  await fs.copyFile(document.tunePath, backupPath, fsConstants.COPYFILE_EXCL);
+  const backupBuffer = await fs.readFile(backupPath);
+  if (sha256(backupBuffer) !== sourceHash) throw new Error("Backup verification failed; CurrentTune.msq was not changed");
+
+  const currentBuffer = await fs.readFile(document.tunePath);
+  if (sha256(currentBuffer) !== sourceHash) throw new Error("CurrentTune.msq changed after backup; edit aborted before replacement");
+
+  const tempPath = resolveInside(document.projectDir, `.CurrentTune.mcp-${crypto.randomUUID()}.tmp`);
+  let tempExists = false;
+  try {
+    const handle = await fs.open(tempPath, "wx", document.stat.mode & 0o777);
+    tempExists = true;
+    try {
+      await handle.writeFile(outputBuffer);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    const finalCheck = await fs.readFile(document.tunePath);
+    if (sha256(finalCheck) !== sourceHash) throw new Error("CurrentTune.msq changed while preparing the update; edit aborted before replacement");
+    await fs.rename(tempPath, document.tunePath);
+    tempExists = false;
+  } finally {
+    if (tempExists) await fs.unlink(tempPath).catch(() => {});
+  }
+
+  const outputHash = sha256(outputBuffer);
+  const backupRelativePath = path.relative(document.projectDir, backupPath);
   const manifest = {
-    format: "tunerstudio-ms-mcp-review-v1",
+    format: "tunerstudio-ms-mcp-current-tune-backup-v1",
     createdAt: new Date().toISOString(),
-    sourceRelativePath: document.relativePath,
-    sourceSha256: sourceHash,
-    outputRelativePath,
-    outputSha256: sha256(outputBuffer),
+    projectId,
+    currentTuneRelativePath: "CurrentTune.msq",
+    beforeSha256: sourceHash,
+    afterSha256: outputHash,
+    backupRelativePath,
+    backupSha256: sourceHash,
     changes: appliedChanges,
     reviewRequired: true,
+    ecuUpdated: false,
   };
-  await fs.writeFile(`${outputPath}.mcp-review.json`, `${JSON.stringify(manifest, null, 2)}\n`, { flag: "wx" });
+  await fs.writeFile(`${backupPath}.mcp-backup.json`, `${JSON.stringify(manifest, null, 2)}\n`, { flag: "wx" });
   return manifest;
 }
 
@@ -571,25 +619,4 @@ export async function launchTunerStudio(projectId, env = process.env) {
   });
   child.unref();
   return { launched: true, pid: child.pid, launcher: info.launcher, requestedProject: projectId || null, projectDirectory };
-}
-
-export async function launchTuneForReview(projectId, reviewRelativePath, env = process.env) {
-  assertSimpleName(projectId, "projectId");
-  const info = await installationInfo(env);
-  if (!info.launcherExists) throw new Error(`TunerStudio launcher not found at ${info.launcher}`);
-  const projectDir = resolveInside(info.projectsDir, projectId);
-  const reviewDir = await resolveExistingRealPathInside(projectDir, path.join(projectDir, "McpReview"));
-  const tunePath = await resolveExistingRealPathInside(projectDir, resolveInside(projectDir, reviewRelativePath));
-  if (tunePath !== reviewDir && !tunePath.startsWith(`${reviewDir}${path.sep}`)) throw new Error("Only tunes in the project's McpReview directory can be launched by this tool");
-  if (!/\.msq$/i.test(tunePath)) throw new Error("Review tune must end in .msq");
-  const stat = await fs.stat(tunePath);
-  if (!stat.isFile()) throw new Error("Review tune is not a file");
-  const child = spawn(info.launcher, [tunePath], {
-    cwd: info.installDir,
-    detached: true,
-    stdio: "ignore",
-    env: { ...process.env, ...env },
-  });
-  child.unref();
-  return { launched: true, pid: child.pid, launcher: info.launcher, projectId, reviewRelativePath: path.relative(projectDir, tunePath), reviewRequired: true };
 }

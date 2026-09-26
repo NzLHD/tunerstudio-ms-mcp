@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { spawn } from "node:child_process";
 import test from "node:test";
-import { compareTunes, getTuneItem, inspectDataLog, inspectProject, inspectTune, listProjects, listTuneItems, stageTuneChanges } from "../src/tunerstudio.js";
+import { applyCurrentTuneChanges, compareTunes, getTuneItem, inspectDataLog, inspectProject, inspectTune, listProjects, listTuneItems } from "../src/tunerstudio.js";
 
 async function fixture() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "tunerstudio-mcp-"));
@@ -40,7 +41,7 @@ test("inspects tune and log summaries", async (t) => {
   assert.equal(log.numericFields.AFR.mean, 14.3);
 });
 
-test("reads settings and tables and stages immutable review tunes", async (t) => {
+test("backs up and atomically updates CurrentTune settings and tables", async (t) => {
   const { root, env } = await fixture();
   t.after(() => fs.rm(root, { recursive: true, force: true }));
 
@@ -50,42 +51,58 @@ test("reads settings and tables and stages immutable review tunes", async (t) =>
 
   const table = await getTuneItem("demo", "CurrentTune.msq", "veTable", 0, env);
   assert.deepEqual(table.item.values, [[1, 2], [3, 4]]);
+  const originalMode = (await fs.stat(path.join(root, "projects", "demo", "CurrentTune.msq"))).mode & 0o777;
 
-  const staged = await stageTuneChanges("demo", "CurrentTune.msq", "review-001.msq", [
+  const applied = await applyCurrentTuneChanges("demo", [
     { kind: "setting", name: "nCylinders", value: "6" },
     { kind: "setting", name: "revLimit", value: 7200 },
     { kind: "tableCells", name: "veTable", cells: [{ row: 1, column: 0, value: 9.5 }] },
   ], listed.sha256, env);
-  assert.equal(staged.outputRelativePath, path.join("McpReview", "review-001.msq"));
-  assert.equal(staged.changes.length, 3);
-  const stagedBytes = await fs.readFile(path.join(root, "projects", "demo", staged.outputRelativePath));
-  assert.equal(stagedBytes.includes(0xB0), true);
+  assert.match(applied.backupRelativePath, /^McpBackups[/\\]CurrentTune-before-/);
+  assert.equal(applied.changes.length, 3);
+  assert.equal(applied.beforeSha256, listed.sha256);
+  assert.equal(applied.backupSha256, listed.sha256);
+  assert.equal(applied.ecuUpdated, false);
+  const currentBytes = await fs.readFile(path.join(root, "projects", "demo", "CurrentTune.msq"));
+  assert.equal(currentBytes.includes(0xB0), true);
+  assert.equal((await fs.stat(path.join(root, "projects", "demo", "CurrentTune.msq"))).mode & 0o777, originalMode);
+  assert.equal((await fs.readdir(path.join(root, "projects", "demo"))).some((name) => name.startsWith(".CurrentTune.mcp-")), false);
 
-  const originalSetting = await getTuneItem("demo", "CurrentTune.msq", "nCylinders", 0, env);
-  const reviewSetting = await getTuneItem("demo", staged.outputRelativePath, "nCylinders", 0, env);
-  const reviewTable = await getTuneItem("demo", staged.outputRelativePath, "veTable", 0, env);
-  assert.equal(originalSetting.item.value, "4");
-  assert.equal(reviewSetting.item.value, "6");
-  assert.deepEqual(reviewTable.item.values, [[1, 2], [9.5, 4]]);
+  const backupSetting = await getTuneItem("demo", applied.backupRelativePath, "nCylinders", 0, env);
+  const currentSetting = await getTuneItem("demo", "CurrentTune.msq", "nCylinders", 0, env);
+  const currentTable = await getTuneItem("demo", "CurrentTune.msq", "veTable", 0, env);
+  assert.equal(backupSetting.item.value, "4");
+  assert.equal(currentSetting.item.value, "6");
+  assert.deepEqual(currentTable.item.values, [[1, 2], [9.5, 4]]);
 
-  const comparison = await compareTunes("demo", "CurrentTune.msq", staged.outputRelativePath, 20, env);
+  const comparison = await compareTunes("demo", applied.backupRelativePath, "CurrentTune.msq", 20, env);
   assert.equal(comparison.totalChangedItems, 3);
   assert.equal(comparison.totalChangedValues, 3);
   assert.equal(comparison.truncated, false);
 
-  const manifest = JSON.parse(await fs.readFile(path.join(root, "projects", "demo", `${staged.outputRelativePath}.mcp-review.json`), "utf8"));
+  const manifest = JSON.parse(await fs.readFile(path.join(root, "projects", "demo", `${applied.backupRelativePath}.mcp-backup.json`), "utf8"));
   assert.equal(manifest.reviewRequired, true);
-  assert.equal(manifest.outputSha256, staged.outputSha256);
+  assert.equal(manifest.afterSha256, applied.afterSha256);
 
-  const replaced = await stageTuneChanges("demo", staged.outputRelativePath, "review-002.msq", [
+  const replaced = await applyCurrentTuneChanges("demo", [
     { kind: "replaceTable", name: "veTable", values: [[5.1, 6.2], [7.3, 8.4]] },
-  ], staged.outputSha256, env);
-  const replacedTable = await getTuneItem("demo", replaced.outputRelativePath, "veTable", 0, env);
+  ], applied.afterSha256, env);
+  const replacedTable = await getTuneItem("demo", "CurrentTune.msq", "veTable", 0, env);
   assert.deepEqual(replacedTable.item.values, [[5.1, 6.2], [7.3, 8.4]]);
+  const secondBackupTable = await getTuneItem("demo", replaced.backupRelativePath, "veTable", 0, env);
+  assert.deepEqual(secondBackupTable.item.values, [[1, 2], [9.5, 4]]);
+});
 
+test("refuses to edit CurrentTune while TunerStudio is running", { skip: process.platform !== "linux" }, async (t) => {
+  const { root, env } = await fixture();
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const source = await listTuneItems("demo", "CurrentTune.msq", {}, env);
+  const fakeTunerStudio = spawn("bash", ["-c", "exec -a TunerStudioMS.jar sleep 30"], { stdio: "ignore" });
+  t.after(() => fakeTunerStudio.kill("SIGTERM"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
   await assert.rejects(
-    () => stageTuneChanges("demo", "CurrentTune.msq", "review-001.msq", [{ kind: "setting", name: "revLimit", value: 7300 }], listed.sha256, env),
-    /already exists/,
+    () => applyCurrentTuneChanges("demo", [{ kind: "setting", name: "revLimit", value: 7200 }], source.sha256, env),
+    /Close TunerStudio/,
   );
 });
 
@@ -94,14 +111,13 @@ test("refuses unsafe or stale tune revisions", async (t) => {
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const source = await listTuneItems("demo", "CurrentTune.msq", {}, env);
   const change = [{ kind: "setting", name: "revLimit", value: 7200 }];
-  await assert.rejects(() => stageTuneChanges("demo", "CurrentTune.msq", "CurrentTune.msq", change, source.sha256, env), /reserved/);
-  await assert.rejects(() => stageTuneChanges("demo", "CurrentTune.msq", "review.msq", change, "0".repeat(64), env), /hash does not match/);
-  await assert.rejects(() => stageTuneChanges("demo", "CurrentTune.msq", "review.msq", [{ kind: "tableCells", name: "veTable", cells: [{ row: 4, column: 0, value: 1 }] }], source.sha256, env), /outside/);
-  await assert.rejects(() => stageTuneChanges("demo", "CurrentTune.msq", "review.msq", [{ kind: "replaceTable", name: "veTable", values: [[1, 2, 3]] }], source.sha256, env), /exactly 2 rows by 2 columns/);
-  await assert.rejects(() => stageTuneChanges("demo", "CurrentTune.msq", "review.msq", change, undefined, env), /required/);
+  await assert.rejects(() => applyCurrentTuneChanges("demo", change, "0".repeat(64), env), /hash does not match/);
+  await assert.rejects(() => applyCurrentTuneChanges("demo", [{ kind: "tableCells", name: "veTable", cells: [{ row: 4, column: 0, value: 1 }] }], source.sha256, env), /outside/);
+  await assert.rejects(() => applyCurrentTuneChanges("demo", [{ kind: "replaceTable", name: "veTable", values: [[1, 2, 3]] }], source.sha256, env), /exactly 2 rows by 2 columns/);
+  await assert.rejects(() => applyCurrentTuneChanges("demo", change, undefined, env), /required/);
 });
 
-test("rejects tune and review symlinks that escape the project", async (t) => {
+test("rejects tune and backup symlinks that escape the project", async (t) => {
   const { root, env } = await fixture();
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const projectDir = path.join(root, "projects", "demo");
@@ -110,12 +126,12 @@ test("rejects tune and review symlinks that escape the project", async (t) => {
   await fs.symlink(outsideTune, path.join(projectDir, "linked.msq"));
   await assert.rejects(() => getTuneItem("demo", "linked.msq", "secret", 0, env), /escapes/);
 
-  const outsideReviewDir = path.join(root, "outside-reviews");
-  await fs.mkdir(outsideReviewDir);
-  await fs.symlink(outsideReviewDir, path.join(projectDir, "McpReview"));
+  const outsideBackupDir = path.join(root, "outside-backups");
+  await fs.mkdir(outsideBackupDir);
+  await fs.symlink(outsideBackupDir, path.join(projectDir, "McpBackups"));
   const source = await listTuneItems("demo", "CurrentTune.msq", {}, env);
   await assert.rejects(
-    () => stageTuneChanges("demo", "CurrentTune.msq", "review.msq", [{ kind: "setting", name: "revLimit", value: 7200 }], source.sha256, env),
+    () => applyCurrentTuneChanges("demo", [{ kind: "setting", name: "revLimit", value: 7200 }], source.sha256, env),
     /escapes/,
   );
 });

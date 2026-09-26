@@ -1,8 +1,8 @@
 {
   "name": "tunerstudio-ms-mcp",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
-  "description": "Local MCP server for inspecting TunerStudio MS projects, tunes, logs, and installation state.",
+  "description": "Local MCP server for inspecting and safely editing TunerStudio MS projects, tunes, and logs.",
   "type": "module",
   "bin": {
     "tunerstudio-mcp": "./src/server.js"

@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import {
+  applyCurrentTuneChanges,
   compareTunes,
   getTuneItem,
   inspectDataLog,
@@ -10,18 +11,16 @@ import {
   inspectTune,
   installationInfo,
   launchTunerStudio,
-  launchTuneForReview,
   listDataLogs,
   listProjects,
   listSerialPorts,
   listTunes,
   listTuneItems,
-  stageTuneChanges,
 } from "./tunerstudio.js";
 
 const server = new McpServer(
-  { name: "tunerstudio-ms", version: "1.1.0" },
-  { instructions: "Inspect TunerStudio projects and tunes before editing. Tune edits create immutable review MSQ files under McpReview; always compare and open the result for user review. This server never writes CurrentTune.msq, downloads to an ECU, burns settings, flashes firmware, or sends controller commands." },
+  { name: "tunerstudio-ms", version: "1.2.0" },
+  { instructions: "Inspect CurrentTune.msq before editing and pass its SHA-256 to apply_current_tune_changes. That tool closes the loop by making a verified backup, atomically updating CurrentTune.msq, and normally launching TunerStudio for user review. Never accept, burn, download to an ECU, flash firmware, or send controller commands." },
 );
 
 function result(data, message) {
@@ -95,20 +94,21 @@ const tuneChangeSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("replaceTable"), name: z.string().min(1), occurrence: z.number().int().min(0).default(0), values: z.array(z.array(z.number().finite()).min(1)).min(1) }),
 ]);
 
-server.registerTool("stage_tune_changes", {
-  title: "Stage tune settings and table changes",
-  description: "Create a new immutable review MSQ under the project's McpReview directory. Never overwrites the source tune, CurrentTune.msq, or an existing review. The user must inspect the result in TunerStudio before any ECU download.",
+server.registerTool("apply_current_tune_changes", {
+  title: "Apply backed-up changes to CurrentTune",
+  description: "Require TunerStudio to be closed, create and verify an immutable backup, atomically update the project's CurrentTune.msq, and launch TunerStudio for user review by default. This never accepts or downloads changes to the ECU.",
   inputSchema: {
     projectId: z.string().min(1),
-    sourceRelativePath: z.string().min(1),
-    outputFileName: z.string().min(5),
     expectedSourceSha256: z.string().regex(/^[0-9a-fA-F]{64}$/),
     changes: z.array(tuneChangeSchema).min(1).max(100),
+    launchForReview: z.boolean().default(true),
   },
   annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
-}, async ({ projectId, sourceRelativePath, outputFileName, changes, expectedSourceSha256 }) => {
-  const data = await stageTuneChanges(projectId, sourceRelativePath, outputFileName, changes, expectedSourceSha256);
-  return result(data, `Created ${data.outputRelativePath} with ${data.changes.length} staged change(s). Review in TunerStudio before downloading to an ECU.`);
+}, async ({ projectId, changes, expectedSourceSha256, launchForReview }) => {
+  const data = await applyCurrentTuneChanges(projectId, changes, expectedSourceSha256);
+  const launch = launchForReview ? await launchTunerStudio(projectId) : null;
+  const response = { ...data, launchedForReview: Boolean(launch), launch };
+  return result(response, `Backed up and updated CurrentTune.msq with ${data.changes.length} change(s).${launch ? " TunerStudio was launched for user review." : " Launch TunerStudio before deciding whether to download to the ECU."}`);
 });
 
 server.registerTool("compare_tunes", {
@@ -119,16 +119,6 @@ server.registerTool("compare_tunes", {
 }, async ({ projectId, leftRelativePath, rightRelativePath, limit }) => {
   const data = await compareTunes(projectId, leftRelativePath, rightRelativePath, limit);
   return result(data, `Found ${data.totalChangedItems} changed item(s) and ${data.totalChangedValues} changed value(s).`);
-});
-
-server.registerTool("launch_tune_for_review", {
-  title: "Open a staged tune for review",
-  description: "Open an MSQ from the project's McpReview directory in TunerStudio. The user must review and explicitly choose whether to download it to the ECU.",
-  inputSchema: { projectId: z.string().min(1), reviewRelativePath: z.string().min(1) },
-  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
-}, async ({ projectId, reviewRelativePath }) => {
-  const data = await launchTuneForReview(projectId, reviewRelativePath);
-  return result(data, `Opened ${data.reviewRelativePath} in TunerStudio for user review.`);
 });
 
 server.registerTool("list_data_logs", {

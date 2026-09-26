@@ -1,8 +1,8 @@
 # TunerStudio MS MCP
 
-A local [Model Context Protocol](https://modelcontextprotocol.io/) server for inspecting TunerStudio MS projects, tune files, data logs, serial ports, and installation state.
+A local [Model Context Protocol](https://modelcontextprotocol.io/) server for inspecting and safely editing TunerStudio MS projects, tune files, data logs, serial ports, and installation state.
 
-The server uses stdio transport and runs entirely on the same computer as TunerStudio. It can launch the TunerStudio desktop application, but intentionally does not write tune values, burn ECU settings, flash firmware, or send controller commands.
+The server uses stdio transport and runs entirely on the same computer as TunerStudio. It can make backup-protected changes to `CurrentTune.msq` and launch TunerStudio for user review, but it never accepts changes, downloads or burns settings to an ECU, flashes firmware, or sends controller commands.
 
 ## Requirements
 
@@ -62,9 +62,8 @@ If TunerStudio uses non-default paths, add the three environment variables to yo
 | `inspect_tune` | Read bounded metadata from a tune file. |
 | `list_tune_items` | Discover scalar settings, arrays, and tables. |
 | `get_tune_item` | Read a complete setting, array, or table with dimensions and units. |
-| `stage_tune_changes` | Create an immutable review tune with scalar or table changes. |
+| `apply_current_tune_changes` | Back up and atomically update `CurrentTune.msq`, then launch TunerStudio for review. |
 | `compare_tunes` | Report changed settings and individual table cells. |
-| `launch_tune_for_review` | Open a staged review tune in TunerStudio. |
 | `list_data_logs` | List `.msl`, `.csv`, and `.mlg` logs. |
 | `inspect_data_log` | Summarize fields and numeric ranges in text logs. |
 | `list_serial_ports` | List likely Linux ECU serial devices and access state. |
@@ -76,19 +75,20 @@ All file inputs are constrained to the configured projects directory. Tune inspe
 
 Tune changes use a review-first workflow:
 
-1. Call `list_tune_items` or `get_tune_item` and retain the returned SHA-256 hash.
-2. Call `stage_tune_changes` with that hash, a new output filename, and one or more changes.
-3. Call `compare_tunes` to inspect every changed setting and table cell.
-4. Call `launch_tune_for_review` to open the staged MSQ in TunerStudio.
-5. The user reviews TunerStudio's validation and difference report, then explicitly decides whether to download the tune to the ECU.
+1. Close TunerStudio so it cannot overwrite `CurrentTune.msq` while the MCP edits it.
+2. Call `list_tune_items` or `get_tune_item` on `CurrentTune.msq` and retain the returned SHA-256 hash.
+3. Call `apply_current_tune_changes` with that hash and one or more changes.
+4. The tool verifies an immutable backup, atomically replaces `CurrentTune.msq`, and launches the project in TunerStudio by default.
+5. Call `compare_tunes` with the returned backup path and `CurrentTune.msq` for a machine-readable change report.
+6. The user reviews TunerStudio's validation and difference report, then explicitly decides whether to accept or download the tune to the ECU.
 
-`stage_tune_changes` supports:
+`apply_current_tune_changes` supports:
 
 - `setting` for scalar numeric or enumerated-string settings.
 - `tableCells` for selected numeric table cells.
 - `replaceTable` for a complete numeric matrix with exactly matching dimensions.
 
-Table row and column indexes are zero-based and follow MSQ file storage order. Every staged tune is written under `<project>/McpReview/` with a JSON change manifest. Existing review files, `CurrentTune.msq`, stale source hashes, dimension mismatches, path traversal, and symlink escapes are rejected.
+Table row and column indexes are zero-based and follow MSQ file storage order. Before every edit, the original tune is copied to `<project>/McpBackups/` and its SHA-256 is verified. A JSON manifest beside the backup records the before/after hashes and exact changes. Stale source hashes, dimension mismatches, concurrent TunerStudio processes, path traversal, and symlink escapes are rejected.
 
 The MCP server cannot download or burn a tune to an ECU. That final action remains exclusively in TunerStudio under direct user control.
 
@@ -100,7 +100,7 @@ npm test
 npm start
 ```
 
-The test suite covers scalar and table editing, immutable revisions, stale-hash rejection, path and symlink traversal rejection, tune comparisons, log parsing, and a real MCP stdio handshake.
+The test suite covers scalar and table editing, verified backups, atomic current-tune replacement, stale-hash rejection, path and symlink traversal rejection, tune comparisons, log parsing, and a real MCP stdio handshake.
 
 ## Serial permissions on Linux
 
