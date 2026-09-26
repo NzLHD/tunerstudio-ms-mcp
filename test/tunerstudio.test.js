@@ -4,19 +4,23 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import test from "node:test";
-import { applyCurrentTuneChanges, compareTunes, getTuneItem, inspectDataLog, inspectProject, inspectTune, listProjects, listTuneItems } from "../src/tunerstudio.js";
+import { applyCurrentTuneChanges, compareTunes, getTuneItem, inspectDataLog, inspectProject, inspectTune, listProjects, listTuneItems, megaLogViewerInstallationInfo, openLogInMegaLogViewer } from "../src/tunerstudio.js";
 
 async function fixture() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "tunerstudio-mcp-"));
   const projectsDir = path.join(root, "projects");
   const projectDir = path.join(projectsDir, "demo");
+  const megaLogViewerHome = path.join(root, "MegaLogViewerMS");
+  const megaLogViewerLauncher = path.join(root, "megalogviewer");
   await fs.mkdir(path.join(projectDir, "projectCfg"), { recursive: true });
   await fs.mkdir(path.join(projectDir, "DataLogs"), { recursive: true });
+  await fs.mkdir(megaLogViewerHome);
+  await fs.writeFile(megaLogViewerLauncher, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
   await fs.writeFile(path.join(projectDir, "projectCfg", "project.properties"), "projectName=Demo Car\necuConfigName=MS3\n");
   await fs.writeFile(path.join(projectDir, "projectCfg", "mainController.ini"), "[MegaTune]\n");
   await fs.writeFile(path.join(projectDir, "CurrentTune.msq"), '<?xml version="1.0" encoding="ISO-8859-1"?><msq><bibliography tuneComment="temperature \xB0F"/><versionInfo signature="MS3"/><page number="0"><constant name="nCylinders">"4"</constant><constant digits="0" name="revLimit" units="RPM">7000</constant><constant cols="2" digits="1" name="veTable" rows="2" units="%">\n  1.0 2.0\n  3.0 4.0\n</constant></page></msq>', "latin1");
   await fs.writeFile(path.join(projectDir, "DataLogs", "run.msl"), "# metadata\nTime,RPM,AFR\n0,900,14.7\n1,1200,13.9\n");
-  return { root, env: { TUNERSTUDIO_PROJECTS_DIR: projectsDir, TUNERSTUDIO_HOME: path.join(root, "app") } };
+  return { root, env: { TUNERSTUDIO_PROJECTS_DIR: projectsDir, TUNERSTUDIO_HOME: path.join(root, "app"), MEGALOGVIEWER_HOME: megaLogViewerHome, MEGALOGVIEWER_LAUNCHER: megaLogViewerLauncher } };
 }
 
 test("lists and inspects projects", async (t) => {
@@ -39,6 +43,23 @@ test("inspects tune and log summaries", async (t) => {
   assert.equal(log.sampledRows, 2);
   assert.equal(log.numericFields.RPM.max, 1200);
   assert.equal(log.numericFields.AFR.mean, 14.3);
+});
+
+test("reports MegaLogViewer installation and opens project logs with view options", async (t) => {
+  const { root, env } = await fixture();
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const installation = await megaLogViewerInstallationInfo(env);
+  assert.equal(installation.installed, true);
+  assert.equal(installation.launcherExists, true);
+  const opened = await openLogInMegaLogViewer("demo", "DataLogs/run.msl", { displayView: "scatterPlot", trailFile: true, startPlayback: true }, env);
+  t.after(() => fs.unlink(opened.launchPropertiesPath).catch(() => {}));
+  assert.equal(opened.launched, true);
+  assert.equal(opened.displayView, "scatterPlot");
+  const properties = await fs.readFile(opened.launchPropertiesPath, "utf8");
+  assert.match(properties, /fileName=.*DataLogs\/run\.msl/);
+  assert.match(properties, /trailFile=true/);
+  assert.match(properties, /displayView=scatterPlot/);
+  assert.match(properties, /startPlayback=true/);
 });
 
 test("backs up and atomically updates CurrentTune settings and tables", async (t) => {
@@ -128,6 +149,10 @@ test("rejects tune and backup symlinks that escape the project", async (t) => {
   await fs.writeFile(outsideTune, '<msq><page><constant name="secret">1</constant></page></msq>');
   await fs.symlink(outsideTune, path.join(projectDir, "linked.msq"));
   await assert.rejects(() => getTuneItem("demo", "linked.msq", "secret", 0, env), /escapes/);
+  const outsideLog = path.join(root, "outside.msl");
+  await fs.writeFile(outsideLog, "Time,RPM\n0,900\n");
+  await fs.symlink(outsideLog, path.join(projectDir, "DataLogs", "linked.msl"));
+  await assert.rejects(() => openLogInMegaLogViewer("demo", "DataLogs/linked.msl", {}, env), /escapes/);
 
   const outsideBackupDir = path.join(root, "outside-backups");
   await fs.mkdir(outsideBackupDir);

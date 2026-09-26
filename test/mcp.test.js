@@ -37,6 +37,7 @@ test("advertises the expected MCP tools and answers an installation query", asyn
   const listed = await client.listTools();
   assert.deepEqual(listed.tools.map((tool) => tool.name), [
     "get_installation_info",
+    "get_megalogviewer_installation_info",
     "list_projects",
     "inspect_project",
     "list_tunes",
@@ -47,6 +48,7 @@ test("advertises the expected MCP tools and answers an installation query", asyn
     "compare_tunes",
     "list_data_logs",
     "inspect_data_log",
+    "open_log_in_megalogviewer",
     "list_serial_ports",
     "launch_tunerstudio",
   ]);

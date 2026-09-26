@@ -2,17 +2,23 @@ import fs from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { promisify } from "node:util";
 import crypto from "node:crypto";
 
 const DEFAULT_INSTALL_DIR = path.join(os.homedir(), ".local", "opt", "TunerStudioMS");
 const DEFAULT_PROJECTS_DIR = path.join(os.homedir(), "TunerStudioProjects");
+const DEFAULT_MEGALOGVIEWER_INSTALL_DIR = path.join(os.homedir(), ".local", "opt", "MegaLogViewerMS");
+const execFileAsync = promisify(execFile);
+const DESKTOP_ENVIRONMENT_KEYS = new Set(["DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"]);
 
 export function getPaths(env = process.env) {
   return {
     installDir: path.resolve(env.TUNERSTUDIO_HOME || DEFAULT_INSTALL_DIR),
     projectsDir: path.resolve(env.TUNERSTUDIO_PROJECTS_DIR || DEFAULT_PROJECTS_DIR),
     launcher: path.resolve(env.TUNERSTUDIO_LAUNCHER || path.join(os.homedir(), ".local", "bin", "tunerstudio")),
+    megaLogViewerInstallDir: path.resolve(env.MEGALOGVIEWER_HOME || DEFAULT_MEGALOGVIEWER_INSTALL_DIR),
+    megaLogViewerLauncher: path.resolve(env.MEGALOGVIEWER_LAUNCHER || path.join(os.homedir(), ".local", "bin", "megalogviewer")),
   };
 }
 
@@ -35,6 +41,19 @@ export async function installationInfo(env = process.env) {
     launcherExists: await exists(launcher),
     projectsDir,
     projectsDirExists: await exists(projectsDir),
+    platform: process.platform,
+    architecture: process.arch,
+  };
+}
+
+export async function megaLogViewerInstallationInfo(env = process.env) {
+  const { megaLogViewerInstallDir, megaLogViewerLauncher } = getPaths(env);
+  const stat = await fs.stat(megaLogViewerInstallDir).catch(() => null);
+  return {
+    installed: Boolean(stat?.isDirectory()),
+    installDir: megaLogViewerInstallDir,
+    launcher: megaLogViewerLauncher,
+    launcherExists: await exists(megaLogViewerLauncher),
     platform: process.platform,
     architecture: process.arch,
   };
@@ -588,6 +607,95 @@ export async function inspectDataLog(projectId, relativePath, env = process.env,
   };
 }
 
+function escapeJavaProperty(value) {
+  return String(value)
+    .replaceAll("\\", "\\\\")
+    .replaceAll("\n", "\\n")
+    .replaceAll("\r", "\\r")
+    .replaceAll("=", "\\=")
+    .replaceAll(":", "\\:");
+}
+
+async function desktopEnvironment(env) {
+  const merged = { ...process.env, ...env };
+  if (process.platform !== "linux" || merged.DISPLAY || merged.WAYLAND_DISPLAY) return merged;
+  const uid = typeof process.getuid === "function" ? process.getuid() : null;
+  if (!merged.XDG_RUNTIME_DIR && uid !== null) merged.XDG_RUNTIME_DIR = `/run/user/${uid}`;
+  if (!merged.DBUS_SESSION_BUS_ADDRESS && merged.XDG_RUNTIME_DIR) merged.DBUS_SESSION_BUS_ADDRESS = `unix:path=${merged.XDG_RUNTIME_DIR}/bus`;
+  try {
+    const { stdout } = await execFileAsync("systemctl", ["--user", "show-environment"], {
+      env: merged,
+      timeout: 2_000,
+      maxBuffer: 256 * 1024,
+    });
+    for (const line of stdout.split(/\r?\n/)) {
+      const separator = line.indexOf("=");
+      if (separator < 1) continue;
+      const key = line.slice(0, separator);
+      if (DESKTOP_ENVIRONMENT_KEYS.has(key) && !merged[key]) merged[key] = line.slice(separator + 1);
+    }
+  } catch {
+    // GUI launchers will exit if no active desktop session can be recovered.
+  }
+  return merged;
+}
+
+async function spawnDetached(command, args, options) {
+  const child = spawn(command, args, { ...options, detached: true, stdio: "ignore" });
+  await new Promise((resolve, reject) => {
+    child.once("spawn", resolve);
+    child.once("error", reject);
+  });
+  child.unref();
+  return child;
+}
+
+export async function openLogInMegaLogViewer(projectId, relativePath, options = {}, env = process.env) {
+  assertSimpleName(projectId, "projectId");
+  const paths = getPaths(env);
+  const installation = await megaLogViewerInstallationInfo(env);
+  if (!installation.launcherExists) throw new Error(`MegaLogViewer launcher not found at ${installation.launcher}`);
+  const projectDir = resolveInside(paths.projectsDir, projectId);
+  const logPath = await resolveExistingRealPathInside(projectDir, resolveInside(projectDir, relativePath));
+  if (!/\.(msl|csv|mlg)$/i.test(logPath)) throw new Error("MegaLogViewer log path must end in .msl, .csv, or .mlg");
+  const stat = await fs.stat(logPath);
+  if (!stat.isFile()) throw new Error("MegaLogViewer log path is not a file");
+  const displayView = options.displayView || "lineGraph";
+  if (!["lineGraph", "scatterPlot", "histogram", "ignitionLogger"].includes(displayView)) throw new Error(`Unsupported MegaLogViewer display view: ${displayView}`);
+  const launchPropertiesPath = path.join(os.tmpdir(), `tunerstudio-mlv-${crypto.randomUUID()}.properties`);
+  const propertyText = [
+    `fileName=${escapeJavaProperty(logPath)}`,
+    `trailFile=${Boolean(options.trailFile)}`,
+    `displayView=${displayView}`,
+    `startPlayback=${Boolean(options.startPlayback)}`,
+    "",
+  ].join("\n");
+  await fs.writeFile(launchPropertiesPath, propertyText, { flag: "wx", mode: 0o600 });
+  let child;
+  try {
+    child = await spawnDetached(installation.launcher, [launchPropertiesPath], {
+      cwd: installation.installDir,
+      env: await desktopEnvironment(env),
+    });
+  } catch (error) {
+    await fs.unlink(launchPropertiesPath).catch(() => {});
+    throw error;
+  }
+  const cleanupTimer = setTimeout(() => fs.unlink(launchPropertiesPath).catch(() => {}), 60_000);
+  cleanupTimer.unref();
+  return {
+    launched: true,
+    pid: child.pid,
+    launcher: installation.launcher,
+    projectId,
+    relativePath: path.relative(projectDir, logPath),
+    displayView,
+    trailFile: Boolean(options.trailFile),
+    startPlayback: Boolean(options.startPlayback),
+    launchPropertiesPath,
+  };
+}
+
 export async function listSerialPorts() {
   if (process.platform !== "linux") return [];
   const deviceNames = await fs.readdir("/dev").catch(() => []);
@@ -612,12 +720,9 @@ export async function launchTunerStudio(projectId, env = process.env) {
     projectDirectory = projectDir;
     args.push(projectDir);
   }
-  const child = spawn(info.launcher, args, {
+  const child = await spawnDetached(info.launcher, args, {
     cwd: info.installDir,
-    detached: true,
-    stdio: "ignore",
-    env: { ...process.env, ...env },
+    env: await desktopEnvironment(env),
   });
-  child.unref();
   return { launched: true, pid: child.pid, launcher: info.launcher, requestedProject: projectId || null, projectDirectory };
 }

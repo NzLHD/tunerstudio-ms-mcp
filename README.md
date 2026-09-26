@@ -1,6 +1,6 @@
 # TunerStudio MS MCP
 
-A local [Model Context Protocol](https://modelcontextprotocol.io/) server for inspecting and safely editing TunerStudio MS projects, tune files, data logs, serial ports, and installation state.
+A local [Model Context Protocol](https://modelcontextprotocol.io/) server for inspecting and safely editing TunerStudio MS projects and opening project data logs in MegaLogViewer MS.
 
 The server uses stdio transport and runs entirely on the same computer as TunerStudio. It can make backup-protected changes to `CurrentTune.msq` and launch TunerStudio for user review, but it never accepts changes, downloads or burns settings to an ECU, flashes firmware, or sends controller commands.
 
@@ -8,15 +8,18 @@ The server uses stdio transport and runs entirely on the same computer as TunerS
 
 - Node.js 20 or newer
 - TunerStudio MS installed locally
-- Java runtime supported by your TunerStudio installation
+- MegaLogViewer MS installed locally for interactive log review
+- A 64-bit Java runtime supported by both applications
 
 The default Linux paths are:
 
 - TunerStudio: `~/.local/opt/TunerStudioMS`
-- Launcher: `~/.local/bin/tunerstudio`
+- TunerStudio launcher: `~/.local/bin/tunerstudio`
+- MegaLogViewer: `~/.local/opt/MegaLogViewerMS`
+- MegaLogViewer launcher: `~/.local/bin/megalogviewer`
 - Projects: `~/TunerStudioProjects`
 
-Override them with `TUNERSTUDIO_HOME`, `TUNERSTUDIO_LAUNCHER`, and `TUNERSTUDIO_PROJECTS_DIR`.
+Override them with `TUNERSTUDIO_HOME`, `TUNERSTUDIO_LAUNCHER`, `TUNERSTUDIO_PROJECTS_DIR`, `MEGALOGVIEWER_HOME`, and `MEGALOGVIEWER_LAUNCHER`.
 
 ## Install
 
@@ -49,13 +52,14 @@ codex mcp add tunerstudio -- node "$PWD/src/server.js"
 codex mcp list
 ```
 
-If TunerStudio uses non-default paths, add the three environment variables to your client configuration. Open a new client session after changing MCP configuration so the tools enter that session's inventory.
+If either application uses non-default paths, add the corresponding environment variables to your client configuration. Open a new client session after changing MCP configuration so the tools enter that session's inventory.
 
 ## Tools
 
 | Tool | Purpose |
 | --- | --- |
 | `get_installation_info` | Check the configured installation and project paths. |
+| `get_megalogviewer_installation_info` | Check the configured MegaLogViewer installation and launcher. |
 | `list_projects` | List local TunerStudio projects. |
 | `inspect_project` | Summarize a project's configuration and files. |
 | `list_tunes` | List `.msq` and `.msqpart` files. |
@@ -66,6 +70,7 @@ If TunerStudio uses non-default paths, add the three environment variables to yo
 | `compare_tunes` | Report changed settings and individual table cells. |
 | `list_data_logs` | List `.msl`, `.csv`, and `.mlg` logs. |
 | `inspect_data_log` | Summarize fields and numeric ranges in text logs. |
+| `open_log_in_megalogviewer` | Open a project log in MegaLogViewer with a selected analysis view. |
 | `list_serial_ports` | List likely Linux ECU serial devices and access state. |
 | `launch_tunerstudio` | Start TunerStudio, optionally with a project. |
 
@@ -92,6 +97,12 @@ Table row and column indexes are zero-based and follow MSQ file storage order. B
 
 The MCP server cannot download or burn a tune to an ECU. That final action remains exclusively in TunerStudio under direct user control.
 
+## MegaLogViewer integration
+
+Use `list_data_logs` to discover logs in a project and `inspect_data_log` for a bounded summary of text-based `.msl` or `.csv` data. Call `open_log_in_megalogviewer` for interactive analysis of project-contained `.msl`, `.csv`, or `.mlg` logs.
+
+The open tool starts MegaLogViewer through a private temporary properties file and supports its `lineGraph`, `scatterPlot`, `histogram`, and `ignitionLogger` views. It can also request live file trailing or automatic playback. The temporary file is mode `0600` and is automatically removed after launch. Log paths are resolved to their real filesystem location and rejected if they escape the configured TunerStudio project, including through symbolic links.
+
 ## Development
 
 ```bash
@@ -100,7 +111,7 @@ npm test
 npm start
 ```
 
-The test suite covers scalar and table editing while TunerStudio is open or closed, verified backups, atomic current-tune replacement, stale-hash rejection, path and symlink traversal rejection, tune comparisons, log parsing, and a real MCP stdio handshake.
+The test suite covers scalar and table editing while TunerStudio is open or closed, verified backups, atomic current-tune replacement, stale-hash rejection, path and symlink traversal rejection, tune comparisons, log parsing, MegaLogViewer launch properties, and a real MCP stdio handshake.
 
 ## Serial permissions on Linux
 

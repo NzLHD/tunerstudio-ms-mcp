@@ -16,11 +16,13 @@ import {
   listSerialPorts,
   listTunes,
   listTuneItems,
+  megaLogViewerInstallationInfo,
+  openLogInMegaLogViewer,
 } from "./tunerstudio.js";
 
 const server = new McpServer(
-  { name: "tunerstudio-ms", version: "1.3.0" },
-  { instructions: "Inspect CurrentTune.msq before editing and pass its SHA-256 to apply_current_tune_changes. The tool makes a verified backup and atomically updates CurrentTune.msq. If TunerStudio is open, it detects the external change and prompts the user; otherwise the tool normally launches it. Never accept, burn, download to an ECU, flash firmware, or send controller commands." },
+  { name: "tunerstudio-ms", version: "1.4.0" },
+  { instructions: "Inspect CurrentTune.msq before editing and pass its SHA-256 to apply_current_tune_changes. The tool makes a verified backup and atomically updates CurrentTune.msq. If TunerStudio is open, it detects the external change and prompts the user; otherwise the tool normally launches it. Use the data-log tools for bounded analysis and open_log_in_megalogviewer when interactive review is useful. Never accept, burn, download to an ECU, flash firmware, or send controller commands." },
 );
 
 function result(data, message) {
@@ -33,6 +35,13 @@ server.registerTool("get_installation_info", {
   inputSchema: {},
   annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
 }, async () => { const data = await installationInfo(); return result(data); });
+
+server.registerTool("get_megalogviewer_installation_info", {
+  title: "Get MegaLogViewer installation info",
+  description: "Check whether MegaLogViewer MS is installed and locate its launcher.",
+  inputSchema: {},
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+}, async () => { const data = await megaLogViewerInstallationInfo(); return result(data); });
 
 server.registerTool("list_projects", {
   title: "List TunerStudio projects",
@@ -139,6 +148,22 @@ server.registerTool("inspect_data_log", {
   inputSchema: { projectId: z.string().min(1), relativePath: z.string().min(1), sampleRows: z.number().int().min(1).max(50000).default(5000) },
   annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
 }, async ({ projectId, relativePath, sampleRows }) => { const data = await inspectDataLog(projectId, relativePath, process.env, sampleRows); return result(data); });
+
+server.registerTool("open_log_in_megalogviewer", {
+  title: "Open a data log in MegaLogViewer",
+  description: "Open a project-contained .msl, .csv, or .mlg log in MegaLogViewer MS, optionally selecting a view, live trailing, or automatic playback.",
+  inputSchema: {
+    projectId: z.string().min(1),
+    relativePath: z.string().min(1),
+    displayView: z.enum(["lineGraph", "scatterPlot", "histogram", "ignitionLogger"]).default("lineGraph"),
+    trailFile: z.boolean().default(false),
+    startPlayback: z.boolean().default(false),
+  },
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+}, async ({ projectId, relativePath, displayView, trailFile, startPlayback }) => {
+  const data = await openLogInMegaLogViewer(projectId, relativePath, { displayView, trailFile, startPlayback });
+  return result(data, `Opened ${data.relativePath} in MegaLogViewer using the ${data.displayView} view.`);
+});
 
 server.registerTool("list_serial_ports", {
   title: "List likely ECU serial ports",
