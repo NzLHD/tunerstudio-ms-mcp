@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "tunerstudio": {
+      "command": "node",
+      "args": ["./src/server.js"]
+    }
+  }
+}
