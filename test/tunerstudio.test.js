@@ -93,17 +93,20 @@ test("backs up and atomically updates CurrentTune settings and tables", async (t
   assert.deepEqual(secondBackupTable.item.values, [[1, 2], [9.5, 4]]);
 });
 
-test("refuses to edit CurrentTune while TunerStudio is running", { skip: process.platform !== "linux" }, async (t) => {
+test("updates CurrentTune while TunerStudio is running", { skip: process.platform !== "linux" }, async (t) => {
   const { root, env } = await fixture();
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const source = await listTuneItems("demo", "CurrentTune.msq", {}, env);
   const fakeTunerStudio = spawn("bash", ["-c", "exec -a TunerStudioMS.jar sleep 30"], { stdio: "ignore" });
   t.after(() => fakeTunerStudio.kill("SIGTERM"));
   await new Promise((resolve) => setTimeout(resolve, 100));
-  await assert.rejects(
-    () => applyCurrentTuneChanges("demo", [{ kind: "setting", name: "revLimit", value: 7200 }], source.sha256, env),
-    /Close TunerStudio/,
-  );
+  const applied = await applyCurrentTuneChanges("demo", [{ kind: "setting", name: "revLimit", value: 7200 }], source.sha256, env);
+  assert.equal(applied.tunerStudioWasRunning, true);
+  assert.equal(applied.tunerStudioProcessIds.includes(fakeTunerStudio.pid), true);
+  const current = await getTuneItem("demo", "CurrentTune.msq", "revLimit", 0, env);
+  const backup = await getTuneItem("demo", applied.backupRelativePath, "revLimit", 0, env);
+  assert.equal(current.item.value, 7200);
+  assert.equal(backup.item.value, 7000);
 });
 
 test("refuses unsafe or stale tune revisions", async (t) => {

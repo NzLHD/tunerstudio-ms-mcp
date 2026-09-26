@@ -75,10 +75,10 @@ All file inputs are constrained to the configured projects directory. Tune inspe
 
 Tune changes use a review-first workflow:
 
-1. Close TunerStudio so it cannot overwrite `CurrentTune.msq` while the MCP edits it.
-2. Call `list_tune_items` or `get_tune_item` on `CurrentTune.msq` and retain the returned SHA-256 hash.
-3. Call `apply_current_tune_changes` with that hash and one or more changes.
-4. The tool verifies an immutable backup, atomically replaces `CurrentTune.msq`, and launches the project in TunerStudio by default.
+1. Call `list_tune_items` or `get_tune_item` on `CurrentTune.msq` and retain the returned SHA-256 hash.
+2. Call `apply_current_tune_changes` with that hash and one or more changes.
+3. The tool verifies an immutable backup and atomically replaces `CurrentTune.msq`.
+4. If TunerStudio is already open, it detects the external file change and prompts the user. Otherwise the tool launches the project by default.
 5. Call `compare_tunes` with the returned backup path and `CurrentTune.msq` for a machine-readable change report.
 6. The user reviews TunerStudio's validation and difference report, then explicitly decides whether to accept or download the tune to the ECU.
 
@@ -88,7 +88,7 @@ Tune changes use a review-first workflow:
 - `tableCells` for selected numeric table cells.
 - `replaceTable` for a complete numeric matrix with exactly matching dimensions.
 
-Table row and column indexes are zero-based and follow MSQ file storage order. Before every edit, the original tune is copied to `<project>/McpBackups/` and its SHA-256 is verified. A JSON manifest beside the backup records the before/after hashes and exact changes. Stale source hashes, dimension mismatches, concurrent TunerStudio processes, path traversal, and symlink escapes are rejected.
+Table row and column indexes are zero-based and follow MSQ file storage order. Before every edit, the original tune is copied to `<project>/McpBackups/` and its SHA-256 is verified. A JSON manifest beside the backup records the before/after hashes, exact changes, and whether TunerStudio was running. Stale source hashes, dimension mismatches, path traversal, and symlink escapes are rejected.
 
 The MCP server cannot download or burn a tune to an ECU. That final action remains exclusively in TunerStudio under direct user control.
 
@@ -100,7 +100,7 @@ npm test
 npm start
 ```
 
-The test suite covers scalar and table editing, verified backups, atomic current-tune replacement, stale-hash rejection, path and symlink traversal rejection, tune comparisons, log parsing, and a real MCP stdio handshake.
+The test suite covers scalar and table editing while TunerStudio is open or closed, verified backups, atomic current-tune replacement, stale-hash rejection, path and symlink traversal rejection, tune comparisons, log parsing, and a real MCP stdio handshake.
 
 ## Serial permissions on Linux
 

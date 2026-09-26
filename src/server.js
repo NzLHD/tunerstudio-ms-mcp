@@ -19,8 +19,8 @@ import {
 } from "./tunerstudio.js";
 
 const server = new McpServer(
-  { name: "tunerstudio-ms", version: "1.2.0" },
-  { instructions: "Inspect CurrentTune.msq before editing and pass its SHA-256 to apply_current_tune_changes. That tool closes the loop by making a verified backup, atomically updating CurrentTune.msq, and normally launching TunerStudio for user review. Never accept, burn, download to an ECU, flash firmware, or send controller commands." },
+  { name: "tunerstudio-ms", version: "1.3.0" },
+  { instructions: "Inspect CurrentTune.msq before editing and pass its SHA-256 to apply_current_tune_changes. The tool makes a verified backup and atomically updates CurrentTune.msq. If TunerStudio is open, it detects the external change and prompts the user; otherwise the tool normally launches it. Never accept, burn, download to an ECU, flash firmware, or send controller commands." },
 );
 
 function result(data, message) {
@@ -96,7 +96,7 @@ const tuneChangeSchema = z.discriminatedUnion("kind", [
 
 server.registerTool("apply_current_tune_changes", {
   title: "Apply backed-up changes to CurrentTune",
-  description: "Require TunerStudio to be closed, create and verify an immutable backup, atomically update the project's CurrentTune.msq, and launch TunerStudio for user review by default. This never accepts or downloads changes to the ECU.",
+  description: "Create and verify an immutable backup, then atomically update the project's CurrentTune.msq. An open TunerStudio instance will show its external-change prompt; otherwise TunerStudio is launched for review by default. This never accepts or downloads changes to the ECU.",
   inputSchema: {
     projectId: z.string().min(1),
     expectedSourceSha256: z.string().regex(/^[0-9a-fA-F]{64}$/),
@@ -106,9 +106,14 @@ server.registerTool("apply_current_tune_changes", {
   annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
 }, async ({ projectId, changes, expectedSourceSha256, launchForReview }) => {
   const data = await applyCurrentTuneChanges(projectId, changes, expectedSourceSha256);
-  const launch = launchForReview ? await launchTunerStudio(projectId) : null;
-  const response = { ...data, launchedForReview: Boolean(launch), launch };
-  return result(response, `Backed up and updated CurrentTune.msq with ${data.changes.length} change(s).${launch ? " TunerStudio was launched for user review." : " Launch TunerStudio before deciding whether to download to the ECU."}`);
+  const launch = launchForReview && !data.tunerStudioWasRunning ? await launchTunerStudio(projectId) : null;
+  const response = { ...data, launchedForReview: Boolean(launch), reviewInExistingTunerStudio: data.tunerStudioWasRunning, launch };
+  const reviewMessage = data.tunerStudioWasRunning
+    ? " The open TunerStudio instance will prompt the user about the external tune change."
+    : launch
+      ? " TunerStudio was launched for user review."
+      : " Launch TunerStudio before deciding whether to download to the ECU.";
+  return result(response, `Backed up and updated CurrentTune.msq with ${data.changes.length} change(s).${reviewMessage}`);
 });
 
 server.registerTool("compare_tunes", {

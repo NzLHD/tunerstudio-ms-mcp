@@ -436,7 +436,6 @@ function backupTimestamp() {
 
 export async function applyCurrentTuneChanges(projectId, changes, expectedSourceSha256, env = process.env) {
   const runningProcesses = await findRunningTunerStudioProcesses();
-  if (runningProcesses.length > 0) throw new Error(`Close TunerStudio before editing CurrentTune.msq (running PID${runningProcesses.length === 1 ? "" : "s"}: ${runningProcesses.join(", ")})`);
   const document = await readTuneDocument(projectId, "CurrentTune.msq", env);
   const sourceHash = sha256(document.buffer);
   if (!expectedSourceSha256) throw new Error("expectedSourceSha256 is required; read CurrentTune.msq again before editing");
@@ -488,6 +487,8 @@ export async function applyCurrentTuneChanges(projectId, changes, expectedSource
     changes: appliedChanges,
     reviewRequired: true,
     ecuUpdated: false,
+    tunerStudioWasRunning: runningProcesses.length > 0,
+    tunerStudioProcessIds: runningProcesses,
   };
   await fs.writeFile(`${backupPath}.mcp-backup.json`, `${JSON.stringify(manifest, null, 2)}\n`, { flag: "wx" });
   return manifest;
